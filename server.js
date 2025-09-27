@@ -7,9 +7,20 @@ const { NlpManager } = require('node-nlp');
 const validator = require('validator');
 
 const app = express();
-const port = 3002;
+const port = 3000;
 
+// Use body-parser middleware once
 app.use(bodyParser.json());
+
+// Placeholder for commented-out ragStore functions
+const {
+  logConversation,
+  retrieveRelevantConversations,
+  listConversations,
+  getConversation,
+  likeConversation,
+  getLikes,
+} = require('./ragStore'); // Assumes ragStore.js exists
 
 // Global variables for models
 let nlpManager;
@@ -20,85 +31,26 @@ const filter = new badWords();
 
 // Load models asynchronously on startup
 async function loadModels() {
-  // Load ES modules dynamically
-  const { default: textToxicityDetectorModule } = await import('text-toxicity-detector');
-  const winkNLP = await import('wink-nlp');
-  const itsModule = await import('wink-nlp/src/its.js');
-  const { default: winkModel } = await import('wink-eng-lite-web-model');
-  
-  textToxicityDetector = textToxicityDetectorModule;
-  its = itsModule;
-  winkNlp = winkNLP.default(winkModel);
-  
   nlpManager = new NlpManager({ languages: ['en'], threshold: 0.7 }); // Increased threshold
   
-  // RESTRICTED TOPICS - More comprehensive training
-  // Terrorism/Violence
-  nlpManager.addDocument('en', 'how to make a bomb', 'restricted.violence');
-  nlpManager.addDocument('en', 'build explosive device', 'restricted.violence');
-  nlpManager.addDocument('en', 'create explosive', 'restricted.violence');
-  nlpManager.addDocument('en', 'make dynamite', 'restricted.violence');
-  nlpManager.addDocument('en', 'how to kill someone', 'restricted.violence');
-  nlpManager.addDocument('en', 'how to murder', 'restricted.violence');
-  nlpManager.addDocument('en', 'ways to harm people', 'restricted.violence');
-  nlpManager.addDocument('en', 'torture methods', 'restricted.violence');
-  
-  // Criminal Activities
-  nlpManager.addDocument('en', 'hack into bank', 'restricted.criminal');
-  nlpManager.addDocument('en', 'steal money online', 'restricted.criminal');
-  nlpManager.addDocument('en', 'credit card fraud', 'restricted.criminal');
-  nlpManager.addDocument('en', 'identity theft', 'restricted.criminal');
-  nlpManager.addDocument('en', 'break into system', 'restricted.criminal');
-  
-  // Explicit/Sexual Content
-  nlpManager.addDocument('en', 'send nude photos', 'restricted.explicit');
-  nlpManager.addDocument('en', 'explicit sexual content', 'restricted.explicit');
-  nlpManager.addDocument('en', 'sexual roleplay', 'restricted.explicit');
-  
-  // Self-harm
-  nlpManager.addDocument('en', 'how to hurt myself', 'restricted.selfharm');
-  nlpManager.addDocument('en', 'suicide methods', 'restricted.selfharm');
-  nlpManager.addDocument('en', 'ways to self harm', 'restricted.selfharm');
-  
-  // GENERAL CONVERSATION - Much more comprehensive training
-  const generalPhrases = [
-    'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening',
-    'how are you', 'how are you doing', 'how have you been',
-    'what is your name', 'who are you', 'tell me about yourself',
-    'tell me a joke', 'make me laugh', 'say something funny',
-    'what can you do', 'how can you help me', 'what are your capabilities',
-    'goodbye', 'bye', 'see you later', 'talk to you later',
-    'thank you', 'thanks', 'i appreciate it',
-    'what time is it', 'what day is it', 'what is the weather',
-    'help me with', 'i need assistance', 'can you help',
-    'tell me about', 'explain', 'what is',
-    'i am happy', 'i am sad', 'i am excited', 'i feel good',
-    'nice to meet you', 'pleasure talking', 'great conversation',
-    'how was your day', 'what did you do today', 'any plans',
-    'favorite color', 'favorite food', 'favorite movie',
-    'recommend something', 'suggest', 'advice',
-    'learning about', 'studying', 'research',
-    'work problems', 'relationship advice', 'life advice',
-    'cooking recipe', 'travel tips', 'book recommendations',
-    'music suggestions', 'movie recommendations',
-    'fitness tips', 'health advice', 'diet plans',
-    'programming help', 'coding questions', 'technical support',
-    'creative writing', 'story ideas', 'brainstorming'
-  ];
-  
-  generalPhrases.forEach(phrase => {
-    nlpManager.addDocument('en', phrase, 'general.conversation');
-  });
-  
-  // Add responses for general conversation
-  nlpManager.addAnswer('en', 'general.conversation', 'I\'m here to help with your questions and have a friendly conversation!');
-  
-  await nlpManager.train();
-  nlpManager.save();
-  console.log('NLP Manager loaded and trained successfully.');
+  // Load pre-trained model instead of training
+  try {
+    await nlpManager.load('./model.nlp'); // Adjust path if your model is stored elsewhere
+    console.log('NLP Manager loaded successfully.');
+  } catch (err) {
+    console.error('❌ Failed to load NLP model:', err.message);
+    throw err; // Rethrow to handle in startup
+  }
 }
 
-loadModels().catch(err => console.error('Error loading models:', err));
+// Load models on startup
+(async () => {
+  try {
+    await loadModels();
+  } catch (err) {
+    console.error('Error loading models:', err);
+  }
+})();
 
 // Middleware 1: Profanity Filter
 function profanityFilter(req, res, next) {
@@ -129,7 +81,6 @@ async function toxicityDetector(req, res, next) {
     const result = textToxicityDetector(input);
     console.log('✅ TOXICITY DETECTOR: Result -', result);
     
-    // More lenient threshold - only block highly toxic content
     if (result.toxicWordsFound > 0 && result.toxicityPercentage > 60) {
       return res.status(400).json({ 
         error: `Toxic content detected`, 
@@ -144,7 +95,6 @@ async function toxicityDetector(req, res, next) {
     next();
   } catch (err) {
     console.error('❌ TOXICITY DETECTOR ERROR:', err);
-    // Continue on error to avoid blocking legitimate requests
     next();
   }
 }
@@ -160,7 +110,6 @@ async function topicRestrictor(req, res, next) {
       classifications: response.classifications.slice(0, 3)
     });
     
-    // Only block if it's clearly a restricted topic with high confidence
     if (response.intent && response.intent.startsWith('restricted.') && response.score > 0.75) {
       return res.status(400).json({ 
         error: `Restricted topic detected: ${response.intent.split('.')[1]}`,
@@ -174,7 +123,6 @@ async function topicRestrictor(req, res, next) {
     next();
   } catch (err) {
     console.error('❌ TOPIC RESTRICTOR ERROR:', err);
-    // Continue on error
     next();
   }
 }
@@ -191,7 +139,6 @@ function contextualSafety(req, res, next) {
     const sentiment = doc.out(its.default.sentiment);
     console.log('✅ CONTEXTUAL SAFETY: Sentiment analysis -', sentiment);
 
-    // Define dangerous combinations with more specific patterns
     const dangerousCombos = [
       {
         keywords: ['suicide', 'kill myself'],
@@ -239,7 +186,6 @@ function promptInjectionDefense(req, res, next) {
   let input = req.body.text;
   const originalInput = input;
 
-  // More specific injection patterns
   const injectionPatterns = [
     /ignore\s+(previous|all|system|above)/i,
     /forget\s+(previous|all|instructions|everything)/i,
@@ -265,7 +211,6 @@ function promptInjectionDefense(req, res, next) {
     });
   }
 
-  // Sanitize input
   input = validator.escape(input);
   input = validator.trim(input);
   
@@ -280,20 +225,39 @@ function promptInjectionDefense(req, res, next) {
 }
 
 // AI Handler
-function aiHandler(req, res) {
+async function aiHandler(req, res) {
   const input = req.body.text;
+  const userId = req.body.userId || req.ip || 'anonymous';
   const profanityInfo = req.body.profanityDetected ? ' (some language was filtered)' : '';
-  
   console.log('✅ AI HANDLER: Generating response for approved input');
-  
-  const response = `Hello! I received your message: "${input}"${profanityInfo}. I'm here to help and have a friendly conversation with you. What would you like to talk about?`;
-  
+
+  let relevantConversations = [];
+  try {
+    relevantConversations = await retrieveRelevantConversations(input, 3);
+  } catch (e) {
+    console.warn('RAG retrieval failed:', e.message);
+  }
+
+  let ragContext = '';
+  if (relevantConversations.length > 0) {
+    ragContext = '\nHere are some related past conversations:\n' + relevantConversations.map((c, i) => `(${i+1}) User: ${c.userMessage}\n    Bot: ${c.botResponse}`).join('\n');
+  }
+
+  const response = `Hello! I received your message: "${input}"${profanityInfo}. I'm here to help and have a friendly conversation with you. What would you like to talk about?${ragContext}`;
+
+  try {
+    await logConversation(userId, input, response);
+  } catch (e) {
+    console.warn('Failed to log conversation:', e.message);
+  }
+
   res.json({ 
     response,
     metadata: {
       inputProcessed: true,
       allChecksPassed: true,
-      profanityFiltered: req.body.profanityDetected || false
+      profanityFiltered: req.body.profanityDetected || false,
+      ragContextCount: relevantConversations.length
     }
   });
 }
@@ -305,6 +269,49 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     nlpReady: nlpManager ? true : false 
   });
+});
+
+// Endpoint: List all conversations
+app.get('/conversations', async (req, res) => {
+  const limit = parseInt(req.query.limit) || 20;
+  const offset = parseInt(req.query.offset) || 0;
+  try {
+    const conversations = await listConversations(limit, offset);
+    res.json({ conversations, limit, offset });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to list conversations', details: e.message });
+  }
+});
+
+// Get a single conversation by ID
+app.get('/conversations/:id', async (req, res) => {
+  try {
+    const convo = await getConversation(req.params.id);
+    if (!convo) return res.status(404).json({ error: 'Conversation not found' });
+    res.json(convo);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to get conversation', details: e.message });
+  }
+});
+
+// Like a conversation
+app.post('/conversations/:id/like', (req, res) => {
+  try {
+    const count = likeConversation(req.params.id);
+    res.json({ id: req.params.id, likes: count });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to like conversation', details: e.message });
+  }
+});
+
+// Get likes for a conversation
+app.get('/conversations/:id/likes', (req, res) => {
+  try {
+    const count = getLikes(req.params.id);
+    res.json({ id: req.params.id, likes: count });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to get likes', details: e.message });
+  }
 });
 
 // Route: Chain all middlewares
@@ -332,5 +339,5 @@ app.use((err, req, res, next) => {
 app.listen(port, () => {
   console.log(`🚀 Server running on http://localhost:${port}`);
   console.log(`📋 Test endpoint: POST http://localhost:${port}/chat`);
-  console.log(`❤️  Health check: GET http://localhost:${port}/health`);
+  console.log(`❤️ Health check: GET http://localhost:${port}/health`);
 });
