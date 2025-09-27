@@ -1,0 +1,336 @@
+// server.js - Fixed Node.js Express App for Testing Input Filtering Guardrails
+
+const express = require('express');
+const bodyParser = require('body-parser');
+const badWords = require('bad-words');
+const { NlpManager } = require('node-nlp');
+const validator = require('validator');
+
+const app = express();
+const port = 3002;
+
+app.use(bodyParser.json());
+
+// Global variables for models
+let nlpManager;
+let winkNlp;
+let textToxicityDetector;
+let its;
+const filter = new badWords();
+
+// Load models asynchronously on startup
+async function loadModels() {
+  // Load ES modules dynamically
+  const { default: textToxicityDetectorModule } = await import('text-toxicity-detector');
+  const winkNLP = await import('wink-nlp');
+  const itsModule = await import('wink-nlp/src/its.js');
+  const { default: winkModel } = await import('wink-eng-lite-web-model');
+  
+  textToxicityDetector = textToxicityDetectorModule;
+  its = itsModule;
+  winkNlp = winkNLP.default(winkModel);
+  
+  nlpManager = new NlpManager({ languages: ['en'], threshold: 0.7 }); // Increased threshold
+  
+  // RESTRICTED TOPICS - More comprehensive training
+  // Terrorism/Violence
+  nlpManager.addDocument('en', 'how to make a bomb', 'restricted.violence');
+  nlpManager.addDocument('en', 'build explosive device', 'restricted.violence');
+  nlpManager.addDocument('en', 'create explosive', 'restricted.violence');
+  nlpManager.addDocument('en', 'make dynamite', 'restricted.violence');
+  nlpManager.addDocument('en', 'how to kill someone', 'restricted.violence');
+  nlpManager.addDocument('en', 'how to murder', 'restricted.violence');
+  nlpManager.addDocument('en', 'ways to harm people', 'restricted.violence');
+  nlpManager.addDocument('en', 'torture methods', 'restricted.violence');
+  
+  // Criminal Activities
+  nlpManager.addDocument('en', 'hack into bank', 'restricted.criminal');
+  nlpManager.addDocument('en', 'steal money online', 'restricted.criminal');
+  nlpManager.addDocument('en', 'credit card fraud', 'restricted.criminal');
+  nlpManager.addDocument('en', 'identity theft', 'restricted.criminal');
+  nlpManager.addDocument('en', 'break into system', 'restricted.criminal');
+  
+  // Explicit/Sexual Content
+  nlpManager.addDocument('en', 'send nude photos', 'restricted.explicit');
+  nlpManager.addDocument('en', 'explicit sexual content', 'restricted.explicit');
+  nlpManager.addDocument('en', 'sexual roleplay', 'restricted.explicit');
+  
+  // Self-harm
+  nlpManager.addDocument('en', 'how to hurt myself', 'restricted.selfharm');
+  nlpManager.addDocument('en', 'suicide methods', 'restricted.selfharm');
+  nlpManager.addDocument('en', 'ways to self harm', 'restricted.selfharm');
+  
+  // GENERAL CONVERSATION - Much more comprehensive training
+  const generalPhrases = [
+    'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening',
+    'how are you', 'how are you doing', 'how have you been',
+    'what is your name', 'who are you', 'tell me about yourself',
+    'tell me a joke', 'make me laugh', 'say something funny',
+    'what can you do', 'how can you help me', 'what are your capabilities',
+    'goodbye', 'bye', 'see you later', 'talk to you later',
+    'thank you', 'thanks', 'i appreciate it',
+    'what time is it', 'what day is it', 'what is the weather',
+    'help me with', 'i need assistance', 'can you help',
+    'tell me about', 'explain', 'what is',
+    'i am happy', 'i am sad', 'i am excited', 'i feel good',
+    'nice to meet you', 'pleasure talking', 'great conversation',
+    'how was your day', 'what did you do today', 'any plans',
+    'favorite color', 'favorite food', 'favorite movie',
+    'recommend something', 'suggest', 'advice',
+    'learning about', 'studying', 'research',
+    'work problems', 'relationship advice', 'life advice',
+    'cooking recipe', 'travel tips', 'book recommendations',
+    'music suggestions', 'movie recommendations',
+    'fitness tips', 'health advice', 'diet plans',
+    'programming help', 'coding questions', 'technical support',
+    'creative writing', 'story ideas', 'brainstorming'
+  ];
+  
+  generalPhrases.forEach(phrase => {
+    nlpManager.addDocument('en', phrase, 'general.conversation');
+  });
+  
+  // Add responses for general conversation
+  nlpManager.addAnswer('en', 'general.conversation', 'I\'m here to help with your questions and have a friendly conversation!');
+  
+  await nlpManager.train();
+  nlpManager.save();
+  console.log('NLP Manager loaded and trained successfully.');
+}
+
+loadModels().catch(err => console.error('Error loading models:', err));
+
+// Middleware 1: Profanity Filter
+function profanityFilter(req, res, next) {
+  const input = req.body.text;
+  const originalInput = input;
+  const clean = filter.clean(input);
+  
+  if (clean !== input) {
+    req.body.text = clean;
+    req.body.profanityDetected = true;
+    req.body.originalText = originalInput;
+    console.log('✅ PROFANITY FILTER: Filtered and masked profanity');
+  } else {
+    req.body.profanityDetected = false;
+    console.log('✅ PROFANITY FILTER: No profanity detected');
+  }
+  next();
+}
+
+// Middleware 2: Toxicity Detection
+async function toxicityDetector(req, res, next) {
+  if (!textToxicityDetector) {
+    console.log('Text toxicity detector not loaded yet');
+    return next();
+  }
+  const input = req.body.text;
+  try {
+    const result = textToxicityDetector(input);
+    console.log('✅ TOXICITY DETECTOR: Result -', result);
+    
+    // More lenient threshold - only block highly toxic content
+    if (result.toxicWordsFound > 0 && result.toxicityPercentage > 60) {
+      return res.status(400).json({ 
+        error: `Toxic content detected`, 
+        details: {
+          toxicity: result.toxicityPercentage + '%',
+          words: result.toxicWordsList,
+          middleware: 'toxicityDetector'
+        }
+      });
+    }
+    console.log('✅ TOXICITY DETECTOR: Content approved');
+    next();
+  } catch (err) {
+    console.error('❌ TOXICITY DETECTOR ERROR:', err);
+    // Continue on error to avoid blocking legitimate requests
+    next();
+  }
+}
+
+// Middleware 3: Topic Restrictions
+async function topicRestrictor(req, res, next) {
+  const input = req.body.text;
+  try {
+    const response = await nlpManager.process('en', input);
+    console.log('✅ TOPIC RESTRICTOR: Classification -', {
+      intent: response.intent,
+      confidence: response.score,
+      classifications: response.classifications.slice(0, 3)
+    });
+    
+    // Only block if it's clearly a restricted topic with high confidence
+    if (response.intent && response.intent.startsWith('restricted.') && response.score > 0.75) {
+      return res.status(400).json({ 
+        error: `Restricted topic detected: ${response.intent.split('.')[1]}`,
+        details: {
+          confidence: Math.round(response.score * 100) + '%',
+          middleware: 'topicRestrictor'
+        }
+      });
+    }
+    console.log('✅ TOPIC RESTRICTOR: Topic allowed');
+    next();
+  } catch (err) {
+    console.error('❌ TOPIC RESTRICTOR ERROR:', err);
+    // Continue on error
+    next();
+  }
+}
+
+// Middleware 4: Contextual Safety Check
+function contextualSafety(req, res, next) {
+  if (!winkNlp || !its) {
+    console.log('Wink NLP not loaded yet');
+    return next();
+  }
+  const input = req.body.text.toLowerCase();
+  try {
+    const doc = winkNlp.readDoc(input);
+    const sentiment = doc.out(its.default.sentiment);
+    console.log('✅ CONTEXTUAL SAFETY: Sentiment analysis -', sentiment);
+
+    // Define dangerous combinations with more specific patterns
+    const dangerousCombos = [
+      {
+        keywords: ['suicide', 'kill myself'],
+        triggers: ['how to', 'method', 'ways to', 'best way'],
+        name: 'suicide methods'
+      },
+      {
+        keywords: ['bomb', 'explosive'],
+        triggers: ['how to make', 'create', 'build', 'instructions'],
+        name: 'explosive instructions'
+      },
+      {
+        keywords: ['poison', 'drug'],
+        triggers: ['how to make', 'create', 'deadly', 'lethal'],
+        name: 'poison creation'
+      }
+    ];
+
+    for (const combo of dangerousCombos) {
+      const hasKeyword = combo.keywords.some(keyword => input.includes(keyword));
+      const hasTrigger = combo.triggers.some(trigger => input.includes(trigger));
+      
+      if (hasKeyword && hasTrigger && sentiment < -0.3) {
+        console.log('❌ CONTEXTUAL SAFETY: Unsafe combination detected -', combo.name);
+        return res.status(400).json({ 
+          error: `Unsafe contextual combination detected`,
+          details: {
+            type: combo.name,
+            middleware: 'contextualSafety'
+          }
+        });
+      }
+    }
+    
+    console.log('✅ CONTEXTUAL SAFETY: Check passed');
+    next();
+  } catch (err) {
+    console.error('❌ CONTEXTUAL SAFETY ERROR:', err);
+    next();
+  }
+}
+
+// Middleware 5: Prompt Injection Defense
+function promptInjectionDefense(req, res, next) {
+  let input = req.body.text;
+  const originalInput = input;
+
+  // More specific injection patterns
+  const injectionPatterns = [
+    /ignore\s+(previous|all|system|above)/i,
+    /forget\s+(previous|all|instructions|everything)/i,
+    /(override|bypass)\s+(system|security|safety)/i,
+    /<\|endofprompt\|>/i,
+    /system\s*:\s*override/i,
+    /prompt\s*:\s*ignore/i,
+    /developer\s+mode/i,
+    /sudo\s+(mode|access)/i,
+    /(act|pretend|roleplay)\s+as\s+(admin|root|system)/i
+  ];
+  
+  const detectedPattern = injectionPatterns.find(pattern => pattern.test(input));
+  
+  if (detectedPattern) {
+    console.log('❌ PROMPT INJECTION: Detected pattern -', detectedPattern.source);
+    return res.status(400).json({ 
+      error: 'Potential prompt injection detected',
+      details: {
+        pattern: 'Suspicious instruction override attempt',
+        middleware: 'promptInjectionDefense'
+      }
+    });
+  }
+
+  // Sanitize input
+  input = validator.escape(input);
+  input = validator.trim(input);
+  
+  if (input !== originalInput) {
+    console.log('✅ PROMPT INJECTION: Input sanitized');
+  } else {
+    console.log('✅ PROMPT INJECTION: No injection detected, input clean');
+  }
+  
+  req.body.text = input;
+  next();
+}
+
+// AI Handler
+function aiHandler(req, res) {
+  const input = req.body.text;
+  const profanityInfo = req.body.profanityDetected ? ' (some language was filtered)' : '';
+  
+  console.log('✅ AI HANDLER: Generating response for approved input');
+  
+  const response = `Hello! I received your message: "${input}"${profanityInfo}. I'm here to help and have a friendly conversation with you. What would you like to talk about?`;
+  
+  res.json({ 
+    response,
+    metadata: {
+      inputProcessed: true,
+      allChecksPassed: true,
+      profanityFiltered: req.body.profanityDetected || false
+    }
+  });
+}
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    nlpReady: nlpManager ? true : false 
+  });
+});
+
+// Route: Chain all middlewares
+app.post('/chat', 
+  profanityFilter, 
+  toxicityDetector, 
+  topicRestrictor, 
+  contextualSafety, 
+  promptInjectionDefense, 
+  aiHandler
+);
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('❌ SERVER ERROR:', err.stack);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    details: {
+      message: 'Something went wrong processing your request'
+    }
+  });
+});
+
+// Start server
+app.listen(port, () => {
+  console.log(`🚀 Server running on http://localhost:${port}`);
+  console.log(`📋 Test endpoint: POST http://localhost:${port}/chat`);
+  console.log(`❤️  Health check: GET http://localhost:${port}/health`);
+});
