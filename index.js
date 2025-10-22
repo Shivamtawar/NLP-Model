@@ -4,3 +4,10 @@
   const result = textToxicityDetector('You are a motherfucker piece of shit asshole bastard cunt.');
   console.log(result);
 })();
+
+
+
+
+
+
+
